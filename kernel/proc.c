@@ -267,11 +267,22 @@ int fork(void) {
   return pid;
 }
 
+const char* state_to_string(enum procstate state) {
+  switch (state) {
+      case UNUSED:    return "unuser";
+      case SLEEPING:  return "sleep";
+      case RUNNABLE:  return "runble";
+      case RUNNING:   return "run";
+      case ZOMBIE:    return "zombie";
+      default:        return "unknow";
+  }
+}
+
 // Pass p's abandoned children to init.
 // Caller must hold p->lock.
 void reparent(struct proc *p) {
   struct proc *pp;
-
+  int i=0;
   for (pp = proc; pp < &proc[NPROC]; pp++) {
     // this code uses pp->parent without holding pp->lock.
     // acquiring the lock first could cause a deadlock
@@ -286,6 +297,8 @@ void reparent(struct proc *p) {
       // initproc->lock, which would be a deadlock, since we hold
       // the lock on one of init's children (pp). this is why
       // exit() always wakes init (before acquiring any locks).
+      exit_info("proc %d exit, child %d, pid %d, name %s, state %s\n", p->pid, i, pp->pid, pp->name, state_to_string(pp->state));
+      i = i+1;
       release(&pp->lock);
     }
   }
@@ -339,6 +352,7 @@ void exit(int status) {
   acquire(&p->lock);
 
   // Give any children to init.
+  exit_info("proc %d exit, parent pid %d, name %s, state %s\n", p->pid, p->parent->pid, p->parent->name, state_to_string(p->parent->state));
   reparent(p);
 
   // Parent might be sleeping in wait().
@@ -356,7 +370,7 @@ void exit(int status) {
 
 // Wait for a child process to exit and return its pid.
 // Return -1 if this process has no children.
-int wait(uint64 addr) {
+int wait(uint64 addr, int flags) {
   struct proc *np;
   int havekids, pid;
   struct proc *p = myproc();
@@ -400,6 +414,10 @@ int wait(uint64 addr) {
       return -1;
     }
 
+    if (flags == 1){
+      release(&p->lock);
+      return -1;
+    }
     // Wait for a child to exit.
     sleep(p, &p->lock);  // DOC: wait-sleep
   }
