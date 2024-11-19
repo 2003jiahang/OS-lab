@@ -34,6 +34,7 @@ void procinit(void) {
     // guard page.
     char *pa = kalloc();
     if (pa == 0) panic("kalloc");
+    p->kstack_pa = (uint64)pa;
     uint64 va = KSTACK((int)(p - proc));
     kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
     p->kstack = va;
@@ -111,6 +112,19 @@ found:
     return 0;
   }
 
+  // 创建独立内核页表
+  p->k_pagetable = ind_kvminit();
+  if (p->k_pagetable == 0){
+    freeproc(p);
+    release(&p->lock);
+    return 0;
+  }
+
+  // 映射内核栈
+  // 之前全局页表的时候会在vm.c中保存全局页表的起始位置，现在变成独立页表需要更改
+  if (mappages(p->k_pagetable, p->kstack, PGSIZE, p->kstack_pa, PTE_R | PTE_W) != 0) panic("kvmmap");
+
+
   // Set up new context to start executing at forkret,
   // which returns to user space.
   memset(&p->context, 0, sizeof(p->context));
@@ -127,6 +141,7 @@ static void freeproc(struct proc *p) {
   if (p->trapframe) kfree((void *)p->trapframe);
   p->trapframe = 0;
   if (p->pagetable) proc_freepagetable(p->pagetable, p->sz);
+  if (p->k_pagetable) proc_freekpagetable(p->k_pagetable, p->kstack_pa);
   p->pagetable = 0;
   p->sz = 0;
   p->pid = 0;
@@ -174,6 +189,17 @@ void proc_freepagetable(pagetable_t pagetable, uint64 sz) {
   uvmfree(pagetable, sz);
 }
 
+void proc_freekpagetable(pagetable_t pagetable, uint64 kstackva) {
+  if ((uint64)pagetable == (r_satp() << 12)) {
+    printf("avoid free self kernel\n");
+    kvminithart();
+  }
+  // freewalkkpage(pagetable, 2, 0);
+  freewalkkpage(pagetable,2,0);
+
+  return;
+}
+
 // a user program that calls exec("/init")
 // od -t xC initcode
 uchar initcode[] = {0x17, 0x05, 0x00, 0x00, 0x13, 0x05, 0x45, 0x02, 0x97, 0x05, 0x00, 0x00, 0x93,
@@ -192,6 +218,8 @@ void userinit(void) {
   // and data into it.
   uvminit(p->pagetable, initcode, sizeof(initcode));
   p->sz = PGSIZE;
+  //lab3
+  sync_pagetable(p->pagetable,p->k_pagetable);
 
   // prepare for the very first "return" from kernel to user.
   p->trapframe->epc = 0;      // user program counter
@@ -214,6 +242,10 @@ int growproc(int n) {
   sz = p->sz;
   if (n > 0) {
     if ((sz = uvmalloc(p->pagetable, sz, sz + n)) == 0) {
+      return -1;
+    }
+    //lab3
+    if(sync_pagetable(p->pagetable,p->k_pagetable) < 0) {
       return -1;
     }
   } else if (n < 0) {
@@ -242,6 +274,12 @@ int fork(void) {
     return -1;
   }
   np->sz = p->sz;
+  //lab3
+  if(sync_pagetable(np->pagetable,np->k_pagetable) < 0) {
+    freeproc(np);
+    release(&np->lock);
+    return -1;
+  }
 
   np->parent = p;
 
@@ -430,10 +468,12 @@ void scheduler(void) {
         // before jumping back to us.
         p->state = RUNNING;
         c->proc = p;
+        kvminitindhart(p->k_pagetable);
         swtch(&c->context, &p->context);
 
         // Process is done running for now.
         // It should have changed its p->state before coming back.
+        kvminithart();
         c->proc = 0;
 
         found = 1;
